@@ -1,0 +1,40 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: mini-payment
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://124.222.192.3:3306/mini_payment?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: 8ik9ol000
+  data:
+    redis:
+      host: 124.222.192.3
+      port: 6379
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: assign_id
+
+app:
+  order:
+    expire-minutes: 15
+  payment:
+    expire-minutes: 15
+  recon:
+    bill-dir: ./recon-bills
+  channel:
+    # mock 渠道：模拟微信/支付宝的支付创建与回调
+    mock:
+      enabled: true
