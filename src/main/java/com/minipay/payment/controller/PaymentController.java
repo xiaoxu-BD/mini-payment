@@ -23,6 +23,11 @@ public class PaymentController {
 
     private final PaymentService paymentService;
 
+    /**
+     * 发起支付
+     * @param request
+     * @return
+     */
     @PostMapping("/initiate")
     public Result<PayResponse> initiate(@Valid @RequestBody InitiatePaymentRequest request) {
         return Result.success(paymentService.initiatePayment(request));

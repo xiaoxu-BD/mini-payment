@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.minipay.channel.ChannelGateway;
 import com.minipay.channel.ChannelNotifyRequest;
 import com.minipay.channel.ChannelNotifyService;
+import com.minipay.channel.dto.ChannelQueryRequest;
+import com.minipay.channel.dto.ChannelQueryResult;
 import com.minipay.common.enums.BizType;
 import com.minipay.common.enums.Channel;
 import com.minipay.common.enums.CloseType;
@@ -15,9 +17,10 @@ import com.minipay.payment.entity.PaymentOrder;
 import com.minipay.payment.mapper.PaymentMapper;
 import com.minipay.payment.mapper.PaymentOrderMapper;
 import com.minipay.payment.service.PaymentService;
+import com.xxl.job.core.context.XxlJobHelper;
+import com.xxl.job.core.handler.annotation.XxlJob;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -37,12 +40,16 @@ public class PaymentTimeoutCloseJob {
     private final ChannelNotifyService channelNotifyService;
     private final PaymentService paymentService;
 
-    @Scheduled(fixedDelay = 60_000, initialDelay = 20_000)
+    @XxlJob("paymentTimeoutCloseJob")
     public void closeExpiredPayingIntents() {
         List<PaymentOrder> expired = paymentOrderMapper.selectList(new LambdaQueryWrapper<PaymentOrder>()
                 .eq(PaymentOrder::getStatus, PaymentOrderStatus.PAYING.name())
                 .lt(PaymentOrder::getExpiredTime, LocalDateTime.now())
                 .last("LIMIT 200"));
+        if (expired.isEmpty()) {
+            return;
+        }
+        XxlJobHelper.log("支付超时兜底: 候选 {} 单", expired.size());
         for (PaymentOrder paymentOrder : expired) {
             try {
                 Payment inFlight = paymentMapper.selectOne(new LambdaQueryWrapper<Payment>()
@@ -50,8 +57,8 @@ public class PaymentTimeoutCloseJob {
                         .eq(Payment::getStatus, PaymentStatus.PAYING.name())
                         .last("LIMIT 1"));
                 if (inFlight != null && inFlight.getChannelTransactionNo() != null) {
-                    ChannelGateway.ChannelQueryResult result = channelGateway.queryPayment(
-                            new ChannelGateway.ChannelQueryRequest(
+                    ChannelQueryResult result = channelGateway.queryPayment(
+                            new ChannelQueryRequest(
                                     Channel.valueOf(inFlight.getChannel()), inFlight.getChannelTransactionNo()));
                     if ("SUCCESS".equals(result.getStatus())) {
                         // 渠道已成功但回调丢失：走标准回调流程补齐（查单兜底，阶段4场景3第3层）

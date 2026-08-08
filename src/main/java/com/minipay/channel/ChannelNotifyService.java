@@ -1,6 +1,7 @@
 package com.minipay.channel;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.common.api.ResultCode;
@@ -11,6 +12,9 @@ import com.minipay.common.enums.PaymentOrderStatus;
 import com.minipay.common.enums.PaymentStatus;
 import com.minipay.common.enums.Source;
 import com.minipay.common.exception.BizException;
+import com.minipay.common.statemachine.OrderStateMachine;
+import com.minipay.common.statemachine.PaymentOrderStateMachine;
+import com.minipay.common.statemachine.PaymentStateMachine;
 import com.minipay.infra.outbox.OutboxService;
 import com.minipay.order.entity.Order;
 import com.minipay.order.event.PaymentFailedEvent;
@@ -84,8 +88,10 @@ public class ChannelNotifyService {
         if (payment == null) {
             throw new BizException(ResultCode.CHANNEL_NOTIFY_INVALID, "支付流水不存在: " + request.getBizNo());
         }
-        if (PaymentStatus.SUCCESS.name().equals(payment.getStatus())) {
-            log.info("支付已是成功态，幂等返回 paymentNo={}", request.getBizNo());
+        PaymentStatus payStatus = EnumUtils.getEnum(PaymentStatus.class, payment.getStatus());
+        // 状态机裁决：只有 PAYING 才允许转 SUCCESS，其余（含重复成功）一律幂等跳过
+        if (payStatus == null || !PaymentStateMachine.canTransition(payStatus, PaymentStatus.SUCCESS)) {
+            log.info("支付流水状态无需处理 paymentNo={}, status={}", payment.getPaymentNo(), payment.getStatus());
             return;
         }
 
@@ -96,25 +102,38 @@ public class ChannelNotifyService {
                 .set(StringUtils.isNotBlank(request.getChannelTransactionNo()),
                         Payment::getChannelTransactionNo, request.getChannelTransactionNo())
                 .eq(Payment::getPaymentNo, request.getBizNo())
-                .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
+                .eq(Payment::getStatus, payStatus.name()));
         if (payRows == 0) {
             log.info("支付流水已被并发处理 paymentNo={}", request.getBizNo());
             return;
         }
 
-        paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                .set(PaymentOrder::getStatus, PaymentOrderStatus.SUCCESS.name())
-                .set(PaymentOrder::getSuccessTime, now)
-                .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo())
-                .eq(PaymentOrder::getStatus, PaymentOrderStatus.PAYING.name()));
+        // 支付意图：状态机裁决后条件更新
+        PaymentOrder paymentOrder = paymentOrderMapper.selectOne(new LambdaQueryWrapper<PaymentOrder>()
+                .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo()));
+        if (paymentOrder != null) {
+            PaymentOrderStatus poStatus = EnumUtils.getEnum(PaymentOrderStatus.class, paymentOrder.getStatus());
+            if (poStatus != null && PaymentOrderStateMachine.canTransition(poStatus, PaymentOrderStatus.SUCCESS)) {
+                paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
+                        .set(PaymentOrder::getStatus, PaymentOrderStatus.SUCCESS.name())
+                        .set(PaymentOrder::getSuccessTime, now)
+                        .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo())
+                        .eq(PaymentOrder::getStatus, poStatus.name()));
+            }
+        }
 
-        int orderRows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, OrderStatus.PAID.name())
-                .set(Order::getPaidTime, now)
-                .eq(Order::getOrderNo, payment.getOrderNo())
-                .eq(Order::getStatus, OrderStatus.PENDING_PAYMENT.name()));
-        if (orderRows == 0) {
-            // 竞态：订单已被取消/关闭，渠道却成功 → 单边账，日终对账+人工兜底（阶段4场景3）
+        // 业务订单：状态机裁决；不可转说明是"迟到成功回调"，告警交给对账/人工兜底
+        Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>()
+                .eq(Order::getOrderNo, payment.getOrderNo()));
+        OrderStatus orderStatus = order == null ? null : EnumUtils.getEnum(OrderStatus.class, order.getStatus());
+        if (order != null && orderStatus != null
+                && OrderStateMachine.canTransition(orderStatus, OrderStatus.PAID)) {
+            orderMapper.update(null, new LambdaUpdateWrapper<Order>()
+                    .set(Order::getStatus, OrderStatus.PAID.name())
+                    .set(Order::getPaidTime, now)
+                    .eq(Order::getOrderNo, payment.getOrderNo())
+                    .eq(Order::getStatus, orderStatus.name()));
+        } else {
             log.error("[告警] 渠道支付成功但订单状态不允许更新 orderNo={}, paymentNo={}，需对账/人工处理",
                     payment.getOrderNo(), payment.getPaymentNo());
         }
@@ -134,21 +153,31 @@ public class ChannelNotifyService {
         if (payment == null) {
             throw new BizException(ResultCode.CHANNEL_NOTIFY_INVALID, "支付流水不存在: " + request.getBizNo());
         }
-        if (PaymentStatus.FAILED.name().equals(payment.getStatus())) {
+        PaymentStatus payStatus = EnumUtils.getEnum(PaymentStatus.class, payment.getStatus());
+        // 状态机裁决：只有 PAYING 才允许转 FAILED
+        if (payStatus == null || !PaymentStateMachine.canTransition(payStatus, PaymentStatus.FAILED)) {
+            log.info("支付流水状态无需处理 paymentNo={}, status={}", payment.getPaymentNo(), payment.getStatus());
             return;
         }
         int payRows = paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
                 .set(Payment::getStatus, PaymentStatus.FAILED.name())
                 .set(Payment::getFailTime, now)
                 .eq(Payment::getPaymentNo, request.getBizNo())
-                .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
+                .eq(Payment::getStatus, payStatus.name()));
         if (payRows == 0) {
             return;
         }
-        paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                .set(PaymentOrder::getStatus, PaymentOrderStatus.FAILED.name())
-                .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo())
-                .eq(PaymentOrder::getStatus, PaymentOrderStatus.PAYING.name()));
+        PaymentOrder paymentOrder = paymentOrderMapper.selectOne(new LambdaQueryWrapper<PaymentOrder>()
+                .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo()));
+        if (paymentOrder != null) {
+            PaymentOrderStatus poStatus = EnumUtils.getEnum(PaymentOrderStatus.class, paymentOrder.getStatus());
+            if (poStatus != null && PaymentOrderStateMachine.canTransition(poStatus, PaymentOrderStatus.FAILED)) {
+                paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
+                        .set(PaymentOrder::getStatus, PaymentOrderStatus.FAILED.name())
+                        .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo())
+                        .eq(PaymentOrder::getStatus, poStatus.name()));
+            }
+        }
 
         insertPaymentLog(payment.getPaymentNo(), PaymentStatus.PAYING.name(), PaymentStatus.FAILED.name(),
                 "渠道支付失败回调");

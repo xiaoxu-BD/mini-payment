@@ -29,8 +29,10 @@ mybatis-plus:
 
 app:
   order:
-    expire-minutes: 15
+#    订单过期时间给30分钟
+    expire-minutes: 30
   payment:
+#    支付过期时间给15分钟
     expire-minutes: 15
   recon:
     bill-dir: ./recon-bills
@@ -38,3 +40,20 @@ app:
     # mock 渠道：模拟微信/支付宝的支付创建与回调
     mock:
       enabled: true
+
+rocketmq:
+  name-server: 192.168.200.128:9876
+  producer-group: mini-payment-producer
+  consumer-group: mini-payment-consumer
+  topic: MINI_PAYMENT_EVENT
+
+xxl:
+  job:
+    # XXL-JOB 调度中心地址；accessToken 按调度中心实际配置填写，未配置则留空
+    admin-addresses: http://192.168.200.128:8082/xxl-job-admin
+    access-token: default_token
+    appname: mini-payment-executor
+    ip:
+    port: 9998
+    log-path: ./logs/xxl-job/jobhandler/
+    log-retention-days: 30

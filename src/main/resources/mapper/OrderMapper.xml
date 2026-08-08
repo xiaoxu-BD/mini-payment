@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.minipay.order.mapper.OrderMapper">
+
+    <!-- 按订单号加行锁：串行化"同一订单创建支付意图"，防止并发创建多个进行中意图 -->
+    <select id="lockByOrderNo" resultType="com.minipay.order.entity.Order">
+        SELECT *
+        FROM t_order
+        WHERE order_no = #{orderNo}
+        FOR UPDATE
+    </select>
+
+</mapper>

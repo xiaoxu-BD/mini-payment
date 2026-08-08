@@ -1,5 +1,6 @@
 package com.minipay.order.service;
 
+import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.common.api.ResultCode;
@@ -7,8 +8,10 @@ import com.minipay.common.enums.CancelType;
 import com.minipay.common.enums.MqEventType;
 import com.minipay.common.enums.OrderStatus;
 import com.minipay.common.exception.BizException;
+import com.minipay.common.statemachine.OrderStateMachine;
 import com.minipay.common.util.BizNoGenerator;
 import com.minipay.infra.outbox.OutboxService;
+import com.minipay.order.dto.CreateOrderItemRequest;
 import com.minipay.order.dto.CreateOrderRequest;
 import com.minipay.order.dto.OrderResponse;
 import com.minipay.order.entity.Order;
@@ -58,10 +61,14 @@ public class OrderService {
         // 模拟商品服务算价 + 商品快照(D4)
         long totalAmount = 0L;
         List<OrderItem> items = new ArrayList<>();
-        for (CreateOrderRequest.ItemRequest item : request.getItems()) {
+        for (CreateOrderItemRequest item : request.getItems()) {
             long amount = item.getUnitPrice() * item.getQuantity();
             totalAmount += amount;
             OrderItem orderItem = new OrderItem();
+            orderItem.setId(BizNoGenerator.id());
+            orderItem.setVersion(0);
+            orderItem.setCreatedAt(now);
+            orderItem.setUpdatedAt(now);
             orderItem.setOrderNo(orderNo);
             orderItem.setItemNo("IT" + BizNoGenerator.eventId());
             orderItem.setProductId(item.getProductId());
@@ -92,10 +99,7 @@ public class OrderService {
             }
             return toResponse(existOrder);
         }
-        for (OrderItem item : items) {
-            //TODO 循环操作数据库
-            orderItemMapper.insert(item);
-        }
+        orderItemMapper.insertList(items);
 
         outboxService.record(SERVICE, MqEventType.ORDER_CREATED,
                 new OrderCreatedEvent(orderNo, order.getUserId(), order.getTotalAmount()));
@@ -119,12 +123,12 @@ public class OrderService {
             if (order == null) {
                 throw new BizException(ResultCode.ORDER_NOT_FOUND);
             }
-            if (OrderStatus.PAID.name().equals(order.getStatus())) {
-                throw new BizException(ResultCode.ORDER_STATUS_INVALID, "订单已支付，不能取消，请走退款");
-            }
-            if (OrderStatus.CANCELLED.name().equals(order.getStatus())) {
+            OrderStatus current = EnumUtils.getEnum(OrderStatus.class, order.getStatus());
+            if (current == OrderStatus.CANCELLED) {
                 return; // 已取消，幂等返回
             }
+            // 状态机裁决：PAID/REFUNDING/REFUNDED 等 → CANCELLED 均非法
+            OrderStateMachine.checkTransition(current, OrderStatus.CANCELLED);
             throw new BizException(ResultCode.ORDER_STATUS_INVALID);
         }
         log.info("订单取消成功 orderNo={}, cancelType={}, operator={}", orderNo, cancelType, operator);

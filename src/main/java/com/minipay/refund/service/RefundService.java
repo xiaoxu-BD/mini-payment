@@ -1,9 +1,12 @@
 package com.minipay.refund.service;
 
 import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.channel.ChannelGateway;
+import com.minipay.channel.dto.ChannelRefundRequest;
+import com.minipay.channel.dto.ChannelRefundResult;
 import com.minipay.channel.ChannelNotifyRequest;
 import com.minipay.common.api.ResultCode;
 import com.minipay.common.enums.Channel;
@@ -14,6 +17,8 @@ import com.minipay.common.enums.PaymentStatus;
 import com.minipay.common.enums.RefundStatus;
 import com.minipay.common.enums.Source;
 import com.minipay.common.exception.BizException;
+import com.minipay.common.statemachine.OrderStateMachine;
+import com.minipay.common.statemachine.RefundStateMachine;
 import com.minipay.common.util.BizNoGenerator;
 import com.minipay.infra.outbox.OutboxService;
 import com.minipay.order.entity.Order;
@@ -36,6 +41,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -61,8 +67,8 @@ public class RefundService {
         if (order == null) {
             throw new BizException(ResultCode.ORDER_NOT_FOUND);
         }
-        if (!OrderStatus.PAID.name().equals(order.getStatus())
-                && !OrderStatus.PARTIALLY_REFUNDED.name().equals(order.getStatus())) {
+        OrderStatus orderStatus = EnumUtils.getEnum(OrderStatus.class, order.getStatus());
+        if (!OrderStateMachine.canTransition(orderStatus, OrderStatus.REFUNDING)) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID, "订单当前状态不可退款");
         }
         PaymentOrder paymentOrder = paymentOrderMapper.selectOne(new LambdaQueryWrapper<PaymentOrder>()
@@ -81,11 +87,15 @@ public class RefundService {
             throw new BizException(ResultCode.REFUND_AMOUNT_EXCEED);
         }
 
-        // 订单进入退款中（条件更新，防止并发重复退款操作）
+        // 订单进入退款中（条件更新，防止并发重复退款操作）；可退款状态集由状态机推导
+        List<String> refundable = Arrays.stream(OrderStatus.values())
+                .filter(s -> OrderStateMachine.canTransition(s, OrderStatus.REFUNDING))
+                .map(Enum::name)
+                .toList();
         int orderRows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
                 .set(Order::getStatus, OrderStatus.REFUNDING.name())
                 .eq(Order::getOrderNo, request.getOrderNo())
-                .in(Order::getStatus, OrderStatus.PAID.name(), OrderStatus.PARTIALLY_REFUNDED.name()));
+                .in(Order::getStatus, refundable));
         if (orderRows == 0) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID, "订单状态变更失败，可能已被并发处理");
         }
@@ -106,8 +116,8 @@ public class RefundService {
 
         try {
             // 事务外调渠道：同一 refund_no 重试渠道侧幂等
-            ChannelGateway.ChannelRefundResult result = channelGateway.createRefund(
-                    new ChannelGateway.ChannelRefundRequest(
+            ChannelRefundResult result = channelGateway.createRefund(
+                    new ChannelRefundRequest(
                             Channel.valueOf(refund.getChannel()), refundNo,
                             payment.getChannelTransactionNo(), request.getAmount()));
             markProcessingTx(refundNo, result.getChannelRefundNo());
@@ -132,16 +142,27 @@ public class RefundService {
         }
         Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>()
                 .eq(Order::getOrderNo, refund.getOrderNo()));
-        if (order == null || (!OrderStatus.PAID.name().equals(order.getStatus())
-                && !OrderStatus.PARTIALLY_REFUNDED.name().equals(order.getStatus()))) {
+        if (order == null) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID, "订单当前状态不可重试退款");
         }
+        OrderStatus orderStatus = EnumUtils.getEnum(OrderStatus.class, order.getStatus());
+        if (!OrderStateMachine.canTransition(orderStatus, OrderStatus.REFUNDING)) {
+            throw new BizException(ResultCode.REFUND_STATUS_INVALID, "订单当前状态不可重试退款");
+        }
+        List<String> refundable = Arrays.stream(OrderStatus.values())
+                .filter(s -> OrderStateMachine.canTransition(s, OrderStatus.REFUNDING))
+                .map(Enum::name)
+                .toList();
         int orderRows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
                 .set(Order::getStatus, OrderStatus.REFUNDING.name())
                 .eq(Order::getOrderNo, refund.getOrderNo())
-                .in(Order::getStatus, OrderStatus.PAID.name(), OrderStatus.PARTIALLY_REFUNDED.name()));
+                .in(Order::getStatus, refundable));
         if (orderRows == 0) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID);
+        }
+        RefundStatus refundStatus = EnumUtils.getEnum(RefundStatus.class, refund.getStatus());
+        if (!RefundStateMachine.canTransition(refundStatus, RefundStatus.CREATED)) {
+            throw new BizException(ResultCode.REFUND_STATUS_INVALID, "仅失败状态的退款单可重试");
         }
         int rows = refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
                 .set(Refund::getStatus, RefundStatus.CREATED.name())
@@ -155,8 +176,8 @@ public class RefundService {
         try {
             Payment payment = paymentMapper.selectOne(new LambdaQueryWrapper<Payment>()
                     .eq(Payment::getPaymentNo, refund.getPaymentNo()));
-            ChannelGateway.ChannelRefundResult result = channelGateway.createRefund(
-                    new ChannelGateway.ChannelRefundRequest(
+            ChannelRefundResult result = channelGateway.createRefund(
+                    new ChannelRefundRequest(
                             Channel.valueOf(refund.getChannel()), refundNo,
                             payment == null ? null : payment.getChannelTransactionNo(), refund.getAmount()));
             markProcessingTx(refundNo, result.getChannelRefundNo());
@@ -177,8 +198,9 @@ public class RefundService {
         if (refund == null) {
             throw new BizException(ResultCode.REFUND_NOT_FOUND);
         }
-        if (RefundStatus.SUCCESS.name().equals(refund.getStatus())) {
-            return; // 幂等
+        RefundStatus refundStatus = EnumUtils.getEnum(RefundStatus.class, refund.getStatus());
+        if (refundStatus == null || !RefundStateMachine.canTransition(refundStatus, RefundStatus.SUCCESS)) {
+            return; // 幂等：已是成功态或非法状态
         }
         int rows = refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
                 .set(Refund::getStatus, RefundStatus.SUCCESS.name())
@@ -187,7 +209,7 @@ public class RefundService {
                         request.getChannelTransactionNo() == null ? refund.getChannelRefundNo()
                                 : request.getChannelTransactionNo())
                 .eq(Refund::getRefundNo, request.getBizNo())
-                .in(Refund::getStatus, RefundStatus.CREATED.name(), RefundStatus.PROCESSING.name()));
+                .eq(Refund::getStatus, refundStatus.name()));
         if (rows == 0) {
             return; // 并发已处理
         }
@@ -207,6 +229,7 @@ public class RefundService {
         String targetStatus = ObjectUtils.equals(paymentOrder.getRefundedAmount(), paymentOrder.getAmount())
                 ? OrderStatus.REFUNDED.name()
                 : OrderStatus.PARTIALLY_REFUNDED.name();
+        OrderStateMachine.checkTransition(OrderStatus.REFUNDING, OrderStatus.valueOf(targetStatus));
         orderMapper.update(null, new LambdaUpdateWrapper<Order>()
                 .set(Order::getStatus, targetStatus)
                 .eq(Order::getOrderNo, refund.getOrderNo())
@@ -228,14 +251,15 @@ public class RefundService {
         if (refund == null) {
             throw new BizException(ResultCode.REFUND_NOT_FOUND);
         }
-        if (RefundStatus.FAILED.name().equals(refund.getStatus())) {
-            return;
+        RefundStatus refundStatus = EnumUtils.getEnum(RefundStatus.class, refund.getStatus());
+        if (refundStatus == null || !RefundStateMachine.canTransition(refundStatus, RefundStatus.FAILED)) {
+            return; // 幂等：已是失败态或非法状态
         }
         int rows = refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
                 .set(Refund::getStatus, RefundStatus.FAILED.name())
                 .set(Refund::getFailTime, LocalDateTime.now())
                 .eq(Refund::getRefundNo, request.getBizNo())
-                .in(Refund::getStatus, RefundStatus.CREATED.name(), RefundStatus.PROCESSING.name()));
+                .eq(Refund::getStatus, refundStatus.name()));
         if (rows == 0) {
             return;
         }
@@ -244,6 +268,7 @@ public class RefundService {
         String targetStatus = ObjectUtils.defaultIfNull(paymentOrder.getRefundedAmount(), 0L) > 0
                 ? OrderStatus.PARTIALLY_REFUNDED.name()
                 : OrderStatus.PAID.name();
+        OrderStateMachine.checkTransition(OrderStatus.REFUNDING, OrderStatus.valueOf(targetStatus));
         orderMapper.update(null, new LambdaUpdateWrapper<Order>()
                 .set(Order::getStatus, targetStatus)
                 .eq(Order::getOrderNo, refund.getOrderNo())

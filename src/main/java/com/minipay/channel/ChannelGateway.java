@@ -1,8 +1,13 @@
 package com.minipay.channel;
 
-import com.minipay.common.enums.Channel;
-import lombok.AllArgsConstructor;
-import lombok.Data;
+import com.minipay.channel.dto.ChannelCloseRequest;
+import com.minipay.channel.dto.ChannelCloseResult;
+import com.minipay.channel.dto.ChannelCreateRequest;
+import com.minipay.channel.dto.ChannelCreateResult;
+import com.minipay.channel.dto.ChannelQueryRequest;
+import com.minipay.channel.dto.ChannelQueryResult;
+import com.minipay.channel.dto.ChannelRefundRequest;
+import com.minipay.channel.dto.ChannelRefundResult;
 
 /**
  * 渠道网关：系统内唯一与 mock 渠道交互的边界（阶段3业务边界）。
@@ -18,64 +23,4 @@ public interface ChannelGateway {
     ChannelRefundResult createRefund(ChannelRefundRequest request);
 
     ChannelQueryResult queryRefund(ChannelQueryRequest request);
-
-    @Data
-    @AllArgsConstructor
-    class ChannelCreateRequest {
-        private Channel channel;
-        private String paymentNo;
-        private Long amount;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelCreateResult {
-        private String channelTransactionNo;
-        private String payUrl;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelCloseRequest {
-        private Channel channel;
-        private String channelTransactionNo;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelCloseResult {
-        private boolean success;
-        private String message;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelQueryRequest {
-        private Channel channel;
-        private String channelTransactionNo;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelQueryResult {
-        private String channelTransactionNo;
-        /** CREATED / SUCCESS / FAILED / CLOSED */
-        private String status;
-        private Long amount;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelRefundRequest {
-        private Channel channel;
-        private String refundNo;
-        private String channelTransactionNo;
-        private Long amount;
-    }
-
-    @Data
-    @AllArgsConstructor
-    class ChannelRefundResult {
-        private String channelRefundNo;
-    }
 }

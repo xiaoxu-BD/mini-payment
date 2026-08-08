@@ -2,6 +2,7 @@ package com.minipay.recon.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.minipay.channel.mock.MockChannelGateway;
+import com.minipay.channel.mock.BillRecord;
 import com.minipay.common.api.ResultCode;
 import com.minipay.common.enums.Channel;
 import com.minipay.common.enums.PaymentStatus;
@@ -9,6 +10,7 @@ import com.minipay.common.enums.ReconDiffStatus;
 import com.minipay.common.enums.ReconDiffType;
 import com.minipay.common.enums.ReconTaskStatus;
 import com.minipay.common.exception.BizException;
+import com.minipay.common.statemachine.ReconDifferenceStateMachine;
 import com.minipay.common.util.BizNoGenerator;
 import com.minipay.payment.entity.Payment;
 import com.minipay.payment.mapper.PaymentMapper;
@@ -16,6 +18,7 @@ import com.minipay.recon.dto.ReconDifferenceResponse;
 import com.minipay.recon.dto.ReconHandleRequest;
 import com.minipay.recon.dto.ReconRunRequest;
 import com.minipay.recon.dto.ReconTaskResponse;
+import com.minipay.recon.dto.BillRow;
 import com.minipay.recon.entity.ReconDifference;
 import com.minipay.recon.entity.ReconTask;
 import com.minipay.recon.mapper.ReconDifferenceMapper;
@@ -30,6 +33,7 @@ import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.EnumUtils;
 import org.apache.commons.lang3.math.NumberUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -43,7 +47,9 @@ import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -116,7 +122,8 @@ public class ReconService {
     @Transactional
     public void hang(String differenceNo, ReconHandleRequest request) {
         ReconDifference diff = requireDiff(differenceNo);
-        requireStatus(diff, ReconDiffStatus.OPEN);
+        ReconDifferenceStateMachine.checkTransition(
+                EnumUtils.getEnum(ReconDiffStatus.class, diff.getStatus()), ReconDiffStatus.HANG);
         diff.setStatus(ReconDiffStatus.HANG.name());
         applyHandle(diff, request);
         if (reconDifferenceMapper.updateById(diff) == 0) {
@@ -127,7 +134,8 @@ public class ReconService {
     @Transactional
     public void resolve(String differenceNo, ReconHandleRequest request) {
         ReconDifference diff = requireDiff(differenceNo);
-        requireStatus(diff, ReconDiffStatus.HANG);
+        ReconDifferenceStateMachine.checkTransition(
+                EnumUtils.getEnum(ReconDiffStatus.class, diff.getStatus()), ReconDiffStatus.RESOLVED);
         diff.setStatus(ReconDiffStatus.RESOLVED.name());
         applyHandle(diff, request);
         if (reconDifferenceMapper.updateById(diff) == 0) {
@@ -138,7 +146,8 @@ public class ReconService {
     @Transactional
     public void close(String differenceNo, ReconHandleRequest request) {
         ReconDifference diff = requireDiff(differenceNo);
-        requireStatus(diff, ReconDiffStatus.RESOLVED);
+        ReconDifferenceStateMachine.checkTransition(
+                EnumUtils.getEnum(ReconDiffStatus.class, diff.getStatus()), ReconDiffStatus.CLOSED);
         diff.setStatus(ReconDiffStatus.CLOSED.name());
         applyHandle(diff, request);
         if (reconDifferenceMapper.updateById(diff) == 0) {
@@ -150,12 +159,12 @@ public class ReconService {
 
     private void generateBillFile(Channel channel, String filePath, boolean injectAnomalies) throws IOException {
         FileUtils.forceMkdirParent(new File(filePath));
-        List<MockChannelGateway.BillRecord> records = mockChannelGateway.snapshotSuccessfulPayments(channel);
+        List<BillRecord> records = mockChannelGateway.snapshotSuccessfulPayments(channel);
         boolean amountModified = false;
         try (CSVPrinter printer = new CSVPrinter(
                 Files.newBufferedWriter(Paths.get(filePath), StandardCharsets.UTF_8), CSVFormat.DEFAULT)) {
             printer.printRecord("channel_transaction_no", "amount", "status");
-            for (MockChannelGateway.BillRecord record : records) {
+            for (BillRecord record : records) {
                 long amount = record.amount();
                 if (injectAnomalies && !amountModified) {
                     amount += 100; // 模拟"金额不一致"差异
@@ -194,12 +203,17 @@ public class ReconService {
         Set<String> billTxns = billRows.stream().map(BillRow::txn).collect(Collectors.toSet());
         int matched = 0;
 
+        // 一次性加载系统成功流水，避免逐笔查库
+        List<Payment> systemSuccess = paymentMapper.selectList(new LambdaQueryWrapper<Payment>()
+                .eq(Payment::getChannel, channel.name())
+                .eq(Payment::getStatus, PaymentStatus.SUCCESS.name()));
+        Map<String, Payment> paymentByTxn = systemSuccess.stream()
+                .filter(p -> StringUtils.isNotBlank(p.getChannelTransactionNo()))
+                .collect(Collectors.toMap(Payment::getChannelTransactionNo, Function.identity(), (a, b) -> a));
+
         // 渠道流水逐笔比对：匹配不上→单边账(渠道多)；金额不一致→AMOUNT_MISMATCH
         for (BillRow row : billRows) {
-            Payment payment = paymentMapper.selectOne(new LambdaQueryWrapper<Payment>()
-                    .eq(Payment::getChannel, channel.name())
-                    .eq(Payment::getChannelTransactionNo, row.txn())
-                    .eq(Payment::getStatus, PaymentStatus.SUCCESS.name()));
+            Payment payment = paymentByTxn.get(row.txn());
             if (payment == null) {
                 insertDifference(task, ReconDiffType.CHANNEL_ONLY, row.txn(), null, row.amount(), null);
             } else if (!ObjectUtils.equals(payment.getAmount(), row.amount())) {
@@ -211,9 +225,6 @@ public class ReconService {
         }
 
         // 系统成功流水但账单缺失 → 单边账(系统多)
-        List<Payment> systemSuccess = paymentMapper.selectList(new LambdaQueryWrapper<Payment>()
-                .eq(Payment::getChannel, channel.name())
-                .eq(Payment::getStatus, PaymentStatus.SUCCESS.name()));
         for (Payment payment : systemSuccess) {
             if (StringUtils.isBlank(payment.getChannelTransactionNo())
                     || !billTxns.contains(payment.getChannelTransactionNo())) {
@@ -251,13 +262,6 @@ public class ReconService {
             throw new BizException(ResultCode.RECON_DIFF_NOT_FOUND);
         }
         return diff;
-    }
-
-    private void requireStatus(ReconDifference diff, ReconDiffStatus expected) {
-        if (!expected.name().equals(diff.getStatus())) {
-            throw new BizException(ResultCode.RECON_DIFF_STATUS_INVALID,
-                    "差异当前状态为 " + diff.getStatus() + "，要求 " + expected);
-        }
     }
 
     private void applyHandle(ReconDifference diff, ReconHandleRequest request) {
@@ -298,6 +302,4 @@ public class ReconService {
                 .build();
     }
 
-    private record BillRow(String txn, Long amount) {
-    }
 }

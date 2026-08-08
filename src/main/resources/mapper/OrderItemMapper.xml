@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.minipay.order.mapper.OrderItemMapper">
+
+    <!-- 批量插入明细：MyBatis foreach，避免循环内单条 insert -->
+    <insert id="insertList">
+        INSERT INTO t_order_item
+        (id, order_no, item_no, product_id, product_name, unit_price, quantity, amount,
+         version, created_at, updated_at)
+        VALUES
+        <foreach collection="items" item="it" separator=",">
+            (#{it.id}, #{it.orderNo}, #{it.itemNo}, #{it.productId}, #{it.productName},
+             #{it.unitPrice}, #{it.quantity}, #{it.amount},
+             #{it.version}, #{it.createdAt}, #{it.updatedAt})
+        </foreach>
+    </insert>
+
+</mapper>

@@ -1,21 +1,25 @@
 package com.minipay.payment.service;
 
+import com.minipay.common.enums.*;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.channel.ChannelGateway;
+import com.minipay.channel.dto.ChannelCloseRequest;
+import com.minipay.channel.dto.ChannelCreateRequest;
+import com.minipay.channel.dto.ChannelCreateResult;
 import com.minipay.common.api.ResultCode;
-import com.minipay.common.enums.CloseType;
-import com.minipay.common.enums.MqEventType;
-import com.minipay.common.enums.OrderStatus;
-import com.minipay.common.enums.PaymentOrderStatus;
-import com.minipay.common.enums.PaymentStatus;
 import com.minipay.common.exception.BizException;
+import com.minipay.common.statemachine.PaymentOrderStateMachine;
+import com.minipay.common.statemachine.PaymentStateMachine;
 import com.minipay.common.util.BizNoGenerator;
 import com.minipay.infra.outbox.OutboxService;
 import com.minipay.order.entity.Order;
 import com.minipay.order.mapper.OrderMapper;
 import com.minipay.payment.dto.InitiatePaymentRequest;
+import com.minipay.payment.dto.IntentCreated;
 import com.minipay.payment.dto.PayResponse;
 import com.minipay.payment.dto.PaymentQueryResponse;
 import com.minipay.payment.entity.Payment;
@@ -29,6 +33,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -54,6 +59,7 @@ public class PaymentService {
      * 发起支付。已有进行中意图则幂等返回（同一时刻至多一个进行中意图）。
      */
     public PayResponse initiatePayment(InitiatePaymentRequest request) {
+        //查询是否有进行中的支付意图 如果有则返回
         PaymentOrder active = findActiveByOrderNo(request.getOrderNo());
         if (active != null) {
             Payment payment = findLatestPayment(active.getPaymentOrderNo());
@@ -70,8 +76,8 @@ public class PaymentService {
         IntentCreated created = createIntentTx(request.getOrderNo(), request.getChannel());
         try {
             // 事务外调渠道：网络调用不进事务
-            ChannelGateway.ChannelCreateResult result = channelGateway.createPayment(
-                    new ChannelGateway.ChannelCreateRequest(request.getChannel(),
+            ChannelCreateResult result = channelGateway.createPayment(
+                    new ChannelCreateRequest(request.getChannel(),
                             created.payment().getPaymentNo(), created.paymentOrder().getAmount()));
             markPayingTx(created.payment().getPaymentNo(), result.getChannelTransactionNo(), result.getPayUrl());
             return PayResponse.builder()
@@ -94,17 +100,46 @@ public class PaymentService {
      * 关闭订单下所有非终态支付意图（订单取消/超时联动，D7）。
      */
     public void closeActivePaymentOrder(String orderNo, CloseType closeType, String operator) {
+        // 可关闭状态集由状态机推导，避免手写规则
+        List<String> closableIntents = Arrays.stream(PaymentOrderStatus.values())
+                .filter(s -> PaymentOrderStateMachine.canTransition(s, PaymentOrderStatus.CLOSED))
+                .map(Enum::name)
+                .toList();
+        List<String> closablePayments = Arrays.stream(PaymentStatus.values())
+                .filter(s -> PaymentStateMachine.canTransition(s, PaymentStatus.CLOSED))
+                .map(Enum::name)
+                .toList();
         List<PaymentOrder> actives = paymentOrderMapper.selectList(new LambdaQueryWrapper<PaymentOrder>()
                 .eq(PaymentOrder::getOrderNo, orderNo)
-                .in(PaymentOrder::getStatus, PaymentOrderStatus.CREATED.name(),
-                        PaymentOrderStatus.PAYING.name(), PaymentOrderStatus.FAILED.name()));
-        for (PaymentOrder paymentOrder : actives) {
-            Payment inFlight = paymentMapper.selectOne(new LambdaQueryWrapper<Payment>()
-                    .eq(Payment::getPaymentOrderNo, paymentOrder.getPaymentOrderNo())
-                    .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
-            boolean closed = markClosedTx(paymentOrder.getPaymentOrderNo(), closeType);
-            if (closed && inFlight != null && inFlight.getChannelTransactionNo() != null) {
-                closeChannelBestEffort(paymentOrder, inFlight);
+                .in(PaymentOrder::getStatus, closableIntents));
+        if (CollectionUtils.isEmpty(actives)) {
+            return;
+        }
+        List<String> paymentOrderNos = actives.stream()
+                .map(PaymentOrder::getPaymentOrderNo)
+                .toList();
+        // 关闭前先取在途流水（用于事务外联动关闭渠道，D7）
+        List<Payment> inFlight = paymentMapper.selectList(new LambdaQueryWrapper<Payment>()
+                .in(Payment::getPaymentOrderNo, paymentOrderNos)
+                .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
+        LocalDateTime now = LocalDateTime.now();
+        // 批量关闭意图：状态守卫保证不与支付成功回调竞争（阶段6锁策略）
+        paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
+                .set(PaymentOrder::getStatus, PaymentOrderStatus.CLOSED.name())
+                .set(PaymentOrder::getCloseType, closeType.name())
+                .set(PaymentOrder::getCloseTime, now)
+                .in(PaymentOrder::getPaymentOrderNo, paymentOrderNos)
+                .in(PaymentOrder::getStatus, closableIntents));
+        // 批量关闭在途流水
+        paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
+                .set(Payment::getStatus, PaymentStatus.CLOSED.name())
+                .set(Payment::getCloseTime, now)
+                .in(Payment::getPaymentOrderNo, paymentOrderNos)
+                .in(Payment::getStatus, closablePayments));
+        // 事务外逐笔联动关闭渠道（网络调用，不进事务）
+        for (Payment payment : inFlight) {
+            if (StringUtils.isNotBlank(payment.getChannelTransactionNo())) {
+                closeChannelBestEffort(payment);
             }
         }
     }
@@ -133,7 +168,7 @@ public class PaymentService {
      * 创建意图事务：锁订单行串行化，防止同一订单并发创建多个进行中意图。
      */
     @Transactional
-    public IntentCreated createIntentTx(String orderNo, com.minipay.common.enums.Channel channel) {
+    public IntentCreated createIntentTx(String orderNo, Channel channel) {
         Order order = orderMapper.lockByOrderNo(orderNo);
         if (order == null) {
             throw new BizException(ResultCode.ORDER_NOT_FOUND);
@@ -205,35 +240,14 @@ public class PaymentService {
                 .in(PaymentOrder::getStatus, PaymentOrderStatus.CREATED.name(), PaymentOrderStatus.PAYING.name()));
     }
 
-    @Transactional
-    public boolean markClosedTx(String paymentOrderNo, CloseType closeType) {
-        LocalDateTime now = LocalDateTime.now();
-        int rows = paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                .set(PaymentOrder::getStatus, PaymentOrderStatus.CLOSED.name())
-                .set(PaymentOrder::getCloseType, closeType.name())
-                .set(PaymentOrder::getCloseTime, now)
-                .eq(PaymentOrder::getPaymentOrderNo, paymentOrderNo)
-                .in(PaymentOrder::getStatus, PaymentOrderStatus.CREATED.name(),
-                        PaymentOrderStatus.PAYING.name(), PaymentOrderStatus.FAILED.name()));
-        if (rows == 0) {
-            return false;
-        }
-        paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
-                .set(Payment::getStatus, PaymentStatus.CLOSED.name())
-                .set(Payment::getCloseTime, now)
-                .eq(Payment::getPaymentOrderNo, paymentOrderNo)
-                .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
-        return true;
-    }
-
-    private void closeChannelBestEffort(PaymentOrder paymentOrder, Payment payment) {
+    private void closeChannelBestEffort(Payment payment) {
         try {
-            channelGateway.closePayment(new ChannelGateway.ChannelCloseRequest(
+            channelGateway.closePayment(new ChannelCloseRequest(
                     com.minipay.common.enums.Channel.valueOf(payment.getChannel()),
                     payment.getChannelTransactionNo()));
         } catch (Exception e) {
-            log.error("[告警] 渠道关闭支付失败 paymentOrderNo={}, txn={}，需查单兜底",
-                    paymentOrder.getPaymentOrderNo(), payment.getChannelTransactionNo(), e);
+            log.error("[告警] 渠道关闭支付失败 paymentNo={}, txn={}，需查单兜底",
+                    payment.getPaymentNo(), payment.getChannelTransactionNo(), e);
         }
     }
 
@@ -253,6 +267,4 @@ public class PaymentService {
         return CollectionUtils.isEmpty(list) ? null : list.get(0);
     }
 
-    public record IntentCreated(PaymentOrder paymentOrder, Payment payment) {
-    }
 }

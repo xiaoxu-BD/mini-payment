@@ -1,9 +1,16 @@
 package com.minipay.channel.mock;
 
 import com.minipay.channel.ChannelGateway;
+import com.minipay.channel.dto.ChannelCloseRequest;
+import com.minipay.channel.dto.ChannelCloseResult;
+import com.minipay.channel.dto.ChannelCreateRequest;
+import com.minipay.channel.dto.ChannelCreateResult;
+import com.minipay.channel.dto.ChannelQueryRequest;
+import com.minipay.channel.dto.ChannelQueryResult;
+import com.minipay.channel.dto.ChannelRefundRequest;
+import com.minipay.channel.dto.ChannelRefundResult;
 import com.minipay.common.enums.Channel;
 import com.minipay.common.util.BizNoGenerator;
-import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -108,19 +115,4 @@ public class MockChannelGateway implements ChannelGateway {
         }
     }
 
-    @Data
-    private static class MockTxn {
-        private final String txnNo;
-        private final Long amount;
-        private volatile String status;
-
-        MockTxn(String txnNo, Long amount, String status) {
-            this.txnNo = txnNo;
-            this.amount = amount;
-            this.status = status;
-        }
-    }
-
-    public record BillRecord(String channelTransactionNo, Long amount) {
-    }
 }

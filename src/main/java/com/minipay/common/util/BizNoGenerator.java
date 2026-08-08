@@ -37,4 +37,8 @@ public final class BizNoGenerator {
     public static String eventId() {
         return IdWorker.getIdStr();
     }
+
+    public static Long id() {
+        return IdWorker.getId();
+    }
 }

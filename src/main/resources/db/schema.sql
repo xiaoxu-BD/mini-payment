@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS t_order_item (
     unit_price    BIGINT       NOT NULL COMMENT '单价快照(分)',
     quantity      INT          NOT NULL COMMENT '数量',
     amount        BIGINT       NOT NULL COMMENT '小计(分)',
+    version         INT          NOT NULL DEFAULT 0 COMMENT '乐观锁',
     created_at    DATETIME(3)  NOT NULL,
     updated_at      DATETIME(3)  NOT NULL,
     PRIMARY KEY (id),
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS t_payment (
     close_time              DATETIME(3) DEFAULT NULL,
     created_at              DATETIME(3) NOT NULL,
     updated_at              DATETIME(3) NOT NULL,
+    version                 INT         NOT NULL DEFAULT 0 COMMENT '乐观锁',
     PRIMARY KEY (id),
     UNIQUE KEY uk_payment_no (payment_no),
     UNIQUE KEY uk_channel_txn (channel, channel_transaction_no),
@@ -91,7 +93,9 @@ CREATE TABLE IF NOT EXISTS t_payment_log (
     source       VARCHAR(16) NOT NULL COMMENT '来源: SYSTEM/CHANNEL_CALLBACK/TIMER/OPERATOR/RECON',
     operator     VARCHAR(64) DEFAULT NULL COMMENT '操作人(人工时必填)',
     remark       VARCHAR(255) DEFAULT NULL,
+    version      INT         NOT NULL DEFAULT 0 COMMENT '乐观锁',
     created_at   DATETIME(3) NOT NULL,
+    updated_at   DATETIME(3) NOT NULL,
     PRIMARY KEY (id),
     KEY idx_payment_created (payment_no, created_at)
 ) ENGINE = InnoDB COMMENT ='支付轨迹(append-only)';
@@ -128,7 +132,9 @@ CREATE TABLE IF NOT EXISTS t_refund_log (
     source       VARCHAR(16) NOT NULL,
     operator     VARCHAR(64) DEFAULT NULL,
     remark       VARCHAR(255) DEFAULT NULL,
+    version      INT         NOT NULL DEFAULT 0 COMMENT '乐观锁',
     created_at   DATETIME(3) NOT NULL,
+    updated_at   DATETIME(3) NOT NULL,
     PRIMARY KEY (id),
     KEY idx_refund_created (refund_no, created_at)
 ) ENGINE = InnoDB COMMENT ='退款轨迹(append-only)';
@@ -143,7 +149,9 @@ CREATE TABLE IF NOT EXISTS t_channel_notify_record (
     biz_no          VARCHAR(32) NOT NULL COMMENT 'payment_no/refund_no',
     raw_payload     TEXT        COMMENT '原始报文',
     process_status  VARCHAR(16) NOT NULL COMMENT 'PROCESSED/DUPLICATE/FAILED',
+    version         INT         NOT NULL DEFAULT 0 COMMENT '乐观锁',
     created_at      DATETIME(3) NOT NULL,
+    updated_at      DATETIME(3) NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_dedup_key (dedup_key),
     KEY idx_biz (biz_type, biz_no)
@@ -159,7 +167,9 @@ CREATE TABLE IF NOT EXISTS t_recon_task (
     matched_count INT         NOT NULL DEFAULT 0,
     diff_count    INT         NOT NULL DEFAULT 0,
     status        VARCHAR(16) NOT NULL COMMENT 'RUNNING/COMPLETED/FAILED',
+    version       INT         NOT NULL DEFAULT 0 COMMENT '乐观锁',
     created_at    DATETIME(3) NOT NULL,
+    updated_at    DATETIME(3) NOT NULL,
     finished_at   DATETIME(3) DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_task_no (task_no),
@@ -200,9 +210,16 @@ CREATE TABLE IF NOT EXISTS t_message_outbox (
     status           VARCHAR(16) NOT NULL COMMENT 'PENDING/SENT/FAILED/DEAD',
     retry_count      INT         NOT NULL DEFAULT 0 COMMENT '重投次数',
     next_retry_time  DATETIME(3) NOT NULL COMMENT '下次重投时间',
+    version          INT         NOT NULL DEFAULT 0 COMMENT '乐观锁',
     created_at       DATETIME(3) NOT NULL,
     updated_at       DATETIME(3) NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_event_id (event_id),
     KEY idx_status_retry (status, next_retry_time)
 ) ENGINE = InnoDB COMMENT ='本地消息表(outbox)';
+
+
+
+-- 历史数据回滚；
+INSERT INTO mini_payment.t_message_outbox (id, event_id, service, event_type, payload, status, retry_count, next_retry_time, created_at, updated_at) VALUES (2085334673407369219, '2085334673407369218', 'order', 'ORDER_CREATED', '{"orderNo":"O2085334673214431234","userId":1001,"totalAmount":19700}', 'PENDING', 0, '2026-08-06 19:58:24.449', '2026-08-06 19:58:24.450', '2026-08-06 19:58:24.450');
+INSERT INTO mini_payment.t_message_outbox (id, event_id, service, event_type, payload, status, retry_count, next_retry_time, created_at, updated_at) VALUES (2085335702135922690, '2085335702135922689', 'order', 'ORDER_CANCELLED', '{"orderNo":"O2085334673214431234","cancelType":"USER"}', 'PENDING', 0, '2026-08-06 20:02:29.716', '2026-08-06 20:02:29.716', '2026-08-06 20:02:29.716');

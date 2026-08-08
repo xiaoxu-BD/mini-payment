@@ -1,71 +1,71 @@
 package com.minipay.job;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.common.enums.OutboxStatus;
-import com.minipay.infra.event.OutboxEventHandler;
+import com.minipay.infra.mq.MqMessage;
+import com.minipay.infra.mq.MqProducer;
 import com.minipay.infra.outbox.Outbox;
 import com.minipay.infra.outbox.OutboxMapper;
-import jakarta.annotation.PostConstruct;
+import com.xxl.job.core.context.XxlJobHelper;
+import com.xxl.job.core.handler.annotation.XxlJob;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
- * outbox 本地转发器：扫描 PENDING → 交给事件处理器（本地模式）。
- * 阶段6接入 RocketMQ 后，本任务改为"投递MQ"，处理器由消费端调用。
+ * outbox 转发器（XXL-JOB 调度）：扫描 PENDING → 投递 RocketMQ → 批量标记 SENT。
+ * 投递失败进入 FAILED/DEAD 等待下轮重投；消费端幂等由业务条件更新保证。
  */
 @Slf4j
-//@Component
+@Component
 @RequiredArgsConstructor
 public class OutboxRelayJob {
 
     private static final int MAX_RETRY = 10;
 
     private final OutboxMapper outboxMapper;
-    private final List<OutboxEventHandler> handlers;
+    private final MqProducer mqProducer;
 
-    private Map<String, OutboxEventHandler> handlerMap;
-
-    @PostConstruct
-    public void init() {
-        handlerMap = handlers.stream().collect(Collectors.toMap(OutboxEventHandler::eventType, Function.identity()));
-    }
-
-    @Scheduled(fixedDelay = 5_000, initialDelay = 5_000)
+    @XxlJob("outboxRelayJob")
     public void relay() {
         List<Outbox> pending = outboxMapper.selectList(new LambdaQueryWrapper<Outbox>()
                 .eq(Outbox::getStatus, OutboxStatus.PENDING.name())
                 .le(Outbox::getNextRetryTime, LocalDateTime.now())
                 .last("LIMIT 100"));
+        if (CollectionUtils.isEmpty(pending)) {
+            return;
+        }
+        XxlJobHelper.log("outbox 转发: 候选 {} 条", pending.size());
+        List<Long> sentIds = new ArrayList<>();
         for (Outbox outbox : pending) {
-            OutboxEventHandler handler = handlerMap.get(outbox.getEventType());
-            if (handler == null) {
-                // 无本地处理器的事件（如 PAYMENT_SUCCEEDED），留给MQ消费端处理，本轮跳过
-                continue;
-            }
             try {
-                handler.handle(outbox.getPayload());
-                outbox.setStatus(OutboxStatus.SENT.name());
-                outboxMapper.updateById(outbox);
+                mqProducer.publish(new MqMessage(outbox.getEventId(), outbox.getEventType(), outbox.getPayload()));
+                sentIds.add(outbox.getId());
             } catch (Exception e) {
                 int retry = outbox.getRetryCount() + 1;
                 outbox.setRetryCount(retry);
                 if (retry >= MAX_RETRY) {
                     outbox.setStatus(OutboxStatus.DEAD.name());
-                    log.error("[告警] outbox 消息进入死信 eventId={}, eventType={}", outbox.getEventId(), outbox.getEventType(), e);
+                    log.error("[告警] outbox 消息进入死信 eventId={}, eventType={}",
+                            outbox.getEventId(), outbox.getEventType(), e);
                 } else {
                     outbox.setStatus(OutboxStatus.FAILED.name());
                     outbox.setNextRetryTime(LocalDateTime.now().plusSeconds(Math.min(60, 2L * retry)));
                 }
                 outboxMapper.updateById(outbox);
             }
+        }
+        // 批量标记已投递，避免循环内逐条 update
+        if (CollectionUtils.isNotEmpty(sentIds)) {
+            outboxMapper.update(null, new LambdaUpdateWrapper<Outbox>()
+                    .set(Outbox::getStatus, OutboxStatus.SENT.name())
+                    .in(Outbox::getId, sentIds));
         }
     }
 }
