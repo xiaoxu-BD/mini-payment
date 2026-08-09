@@ -10,4 +10,51 @@
         FOR UPDATE
     </select>
 
+    <!-- 取消订单：状态守卫防止与支付成功回调竞争 -->
+    <update id="cancelByOrderNo">
+        UPDATE t_order
+        SET status = 'CANCELLED', cancel_type = #{cancelType}, cancel_time = #{cancelTime}
+        WHERE order_no = #{orderNo} AND status = 'PENDING_PAYMENT'
+    </update>
+
+    <!-- 支付成功回调：订单 → PAID（fromStatus 由状态机裁决后的当前态传入） -->
+    <update id="markPaid">
+        UPDATE t_order
+        SET status = 'PAID', paid_time = #{paidTime}
+        WHERE order_no = #{orderNo} AND status = #{fromStatus}
+    </update>
+
+    <!-- 进入退款中：可退款状态集由服务层状态机推导传入 -->
+    <update id="markRefunding">
+        UPDATE t_order
+        SET status = 'REFUNDING'
+        WHERE order_no = #{orderNo}
+          AND status IN
+        <foreach collection="refundable" item="s" open="(" separator="," close=")">
+            #{s}
+        </foreach>
+    </update>
+
+    <!-- 退款结果回调：REFUNDING → 目标状态 -->
+    <update id="updateStatusFromRefunding">
+        UPDATE t_order
+        SET status = #{targetStatus}
+        WHERE order_no = #{orderNo} AND status = 'REFUNDING'
+    </update>
+
+    <!-- 超时批量取消：状态守卫 + 过期校验，重复执行天然安全 -->
+    <update id="batchCancel">
+        UPDATE t_order
+        SET status = 'CANCELLED', cancel_type = 'TIMEOUT', cancel_time = #{cancelTime}
+        WHERE order_no IN
+        <foreach collection="orderNos" item="no" open="(" separator="," close=")">
+            #{no}
+        </foreach>
+          AND status IN
+        <foreach collection="cancellable" item="s" open="(" separator="," close=")">
+            #{s}
+        </foreach>
+          AND expired_time &lt; #{cancelTime}
+    </update>
+
 </mapper>

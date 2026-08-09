@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.minipay.recon.mapper.ReconDifferenceMapper">
+
+    <!-- 人工处理：乐观锁 version 守卫，影响 0 行 = 并发冲突 -->
+    <update id="updateHandleInfo">
+        UPDATE t_recon_difference
+        SET status = #{status}, operator = #{operator}, remark = #{remark},
+            handle_time = #{handleTime}, updated_at = #{updatedAt}
+        WHERE id = #{id} AND version = #{version}
+    </update>
+
+</mapper>

@@ -5,3 +5,9 @@ target/
 logs/
 *.log
 .DS_Store
+.logs/
+*.csv
+*.ps1
+*.md
+*.py
+*.sh

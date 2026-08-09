@@ -1,7 +1,6 @@
 package com.minipay.job;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.apache.commons.collections4.CollectionUtils;
 import com.minipay.common.enums.CancelType;
 import com.minipay.common.enums.MqEventType;
@@ -51,13 +50,7 @@ public class TimeoutCancelJob {
         List<String> orderNos = candidates.stream().map(Order::getOrderNo).toList();
         LocalDateTime now = LocalDateTime.now();
         // 批量条件取消：状态守卫 + 过期校验，竞态中支付成功回调获胜的订单不会被取消
-        int affected = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, OrderStatus.CANCELLED.name())
-                .set(Order::getCancelType, CancelType.TIMEOUT.name())
-                .set(Order::getCancelTime, now)
-                .in(Order::getOrderNo, orderNos)
-                .in(Order::getStatus, cancellable)
-                .lt(Order::getExpiredTime, now));
+        int affected = orderMapper.batchCancel(orderNos, cancellable, now);
         if (affected == 0) {
             return;
         }

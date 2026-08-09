@@ -1,9 +1,9 @@
 package com.minipay.channel;
 
+import com.minipay.refund.service.RefundService;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.common.api.ResultCode;
 import com.minipay.common.enums.MqEventType;
 import com.minipay.common.enums.NotifyProcessStatus;
@@ -33,6 +33,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 渠道回调处理：幂等账本(dedup_key唯一约束) → 状态守卫条件更新 → 同事务更新支付/意图/订单。
@@ -48,7 +49,7 @@ public class ChannelNotifyService {
     private final PaymentLogMapper paymentLogMapper;
     private final OrderMapper orderMapper;
     private final OutboxService outboxService;
-    private final com.minipay.refund.service.RefundService refundService;
+    private final RefundService refundService;
 
     @Transactional
     public void handleNotify(ChannelNotifyRequest request) {
@@ -95,14 +96,9 @@ public class ChannelNotifyService {
             return;
         }
 
-        // 第二道防线：状态守卫条件更新（并发重复回调只有一个成功）
-        int payRows = paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
-                .set(Payment::getStatus, PaymentStatus.SUCCESS.name())
-                .set(Payment::getSuccessTime, now)
-                .set(StringUtils.isNotBlank(request.getChannelTransactionNo()),
-                        Payment::getChannelTransactionNo, request.getChannelTransactionNo())
-                .eq(Payment::getPaymentNo, request.getBizNo())
-                .eq(Payment::getStatus, payStatus.name()));
+        // 第二道防线：状态守卫条件更新（并发重复回调只有一个成功），SQL 见 PaymentMapper.xml
+        int payRows = paymentMapper.markPaySuccess(request.getBizNo(), now,
+                request.getChannelTransactionNo(), payStatus.name());
         if (payRows == 0) {
             log.info("支付流水已被并发处理 paymentNo={}", request.getBizNo());
             return;
@@ -114,11 +110,7 @@ public class ChannelNotifyService {
         if (paymentOrder != null) {
             PaymentOrderStatus poStatus = EnumUtils.getEnum(PaymentOrderStatus.class, paymentOrder.getStatus());
             if (poStatus != null && PaymentOrderStateMachine.canTransition(poStatus, PaymentOrderStatus.SUCCESS)) {
-                paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                        .set(PaymentOrder::getStatus, PaymentOrderStatus.SUCCESS.name())
-                        .set(PaymentOrder::getSuccessTime, now)
-                        .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo())
-                        .eq(PaymentOrder::getStatus, poStatus.name()));
+                paymentOrderMapper.markSuccess(payment.getPaymentOrderNo(), now, poStatus.name());
             }
         }
 
@@ -128,11 +120,7 @@ public class ChannelNotifyService {
         OrderStatus orderStatus = order == null ? null : EnumUtils.getEnum(OrderStatus.class, order.getStatus());
         if (order != null && orderStatus != null
                 && OrderStateMachine.canTransition(orderStatus, OrderStatus.PAID)) {
-            orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                    .set(Order::getStatus, OrderStatus.PAID.name())
-                    .set(Order::getPaidTime, now)
-                    .eq(Order::getOrderNo, payment.getOrderNo())
-                    .eq(Order::getStatus, orderStatus.name()));
+            orderMapper.markPaid(payment.getOrderNo(), now, orderStatus.name());
         } else {
             log.error("[告警] 渠道支付成功但订单状态不允许更新 orderNo={}, paymentNo={}，需对账/人工处理",
                     payment.getOrderNo(), payment.getPaymentNo());
@@ -159,11 +147,7 @@ public class ChannelNotifyService {
             log.info("支付流水状态无需处理 paymentNo={}, status={}", payment.getPaymentNo(), payment.getStatus());
             return;
         }
-        int payRows = paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
-                .set(Payment::getStatus, PaymentStatus.FAILED.name())
-                .set(Payment::getFailTime, now)
-                .eq(Payment::getPaymentNo, request.getBizNo())
-                .eq(Payment::getStatus, payStatus.name()));
+        int payRows = paymentMapper.markPayFailed(request.getBizNo(), now, payStatus.name());
         if (payRows == 0) {
             return;
         }
@@ -172,10 +156,7 @@ public class ChannelNotifyService {
         if (paymentOrder != null) {
             PaymentOrderStatus poStatus = EnumUtils.getEnum(PaymentOrderStatus.class, paymentOrder.getStatus());
             if (poStatus != null && PaymentOrderStateMachine.canTransition(poStatus, PaymentOrderStatus.FAILED)) {
-                paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                        .set(PaymentOrder::getStatus, PaymentOrderStatus.FAILED.name())
-                        .eq(PaymentOrder::getPaymentOrderNo, payment.getPaymentOrderNo())
-                        .eq(PaymentOrder::getStatus, poStatus.name()));
+                paymentOrderMapper.markFailed(payment.getPaymentOrderNo(), List.of(poStatus.name()));
             }
         }
 

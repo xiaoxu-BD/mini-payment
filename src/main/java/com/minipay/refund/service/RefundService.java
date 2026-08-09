@@ -3,7 +3,6 @@ package com.minipay.refund.service;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.channel.ChannelGateway;
 import com.minipay.channel.dto.ChannelRefundRequest;
 import com.minipay.channel.dto.ChannelRefundResult;
@@ -92,10 +91,7 @@ public class RefundService {
                 .filter(s -> OrderStateMachine.canTransition(s, OrderStatus.REFUNDING))
                 .map(Enum::name)
                 .toList();
-        int orderRows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, OrderStatus.REFUNDING.name())
-                .eq(Order::getOrderNo, request.getOrderNo())
-                .in(Order::getStatus, refundable));
+        int orderRows = orderMapper.markRefunding(request.getOrderNo(), refundable);
         if (orderRows == 0) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID, "订单状态变更失败，可能已被并发处理");
         }
@@ -153,10 +149,7 @@ public class RefundService {
                 .filter(s -> OrderStateMachine.canTransition(s, OrderStatus.REFUNDING))
                 .map(Enum::name)
                 .toList();
-        int orderRows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, OrderStatus.REFUNDING.name())
-                .eq(Order::getOrderNo, refund.getOrderNo())
-                .in(Order::getStatus, refundable));
+        int orderRows = orderMapper.markRefunding(refund.getOrderNo(), refundable);
         if (orderRows == 0) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID);
         }
@@ -164,12 +157,7 @@ public class RefundService {
         if (!RefundStateMachine.canTransition(refundStatus, RefundStatus.CREATED)) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID, "仅失败状态的退款单可重试");
         }
-        int rows = refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
-                .set(Refund::getStatus, RefundStatus.CREATED.name())
-                .set(Refund::getRetryCount, refund.getRetryCount() + 1)
-                .set(Refund::getOperator, operator)
-                .eq(Refund::getRefundNo, refundNo)
-                .eq(Refund::getStatus, RefundStatus.FAILED.name()));
+        int rows = refundMapper.markCreatedForRetry(refundNo, refund.getRetryCount() + 1, operator);
         if (rows == 0) {
             throw new BizException(ResultCode.REFUND_STATUS_INVALID);
         }
@@ -202,23 +190,16 @@ public class RefundService {
         if (refundStatus == null || !RefundStateMachine.canTransition(refundStatus, RefundStatus.SUCCESS)) {
             return; // 幂等：已是成功态或非法状态
         }
-        int rows = refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
-                .set(Refund::getStatus, RefundStatus.SUCCESS.name())
-                .set(Refund::getSuccessTime, LocalDateTime.now())
-                .set(Refund::getChannelRefundNo,
-                        request.getChannelTransactionNo() == null ? refund.getChannelRefundNo()
-                                : request.getChannelTransactionNo())
-                .eq(Refund::getRefundNo, request.getBizNo())
-                .eq(Refund::getStatus, refundStatus.name()));
+        String channelRefundNo = request.getChannelTransactionNo() == null
+                ? refund.getChannelRefundNo() : request.getChannelTransactionNo();
+        int rows = refundMapper.markRefundSuccess(request.getBizNo(), LocalDateTime.now(),
+                channelRefundNo, refundStatus.name());
         if (rows == 0) {
             return; // 并发已处理
         }
 
         // 原子累加已退金额：refunded_amount + amount <= amount 防超退（阶段6锁策略）
-        int accRows = paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                .setSql("refunded_amount = refunded_amount + {0}", refund.getAmount())
-                .eq(PaymentOrder::getPaymentOrderNo, refund.getPaymentOrderNo())
-                .apply("refunded_amount + {0} <= amount", refund.getAmount()));
+        int accRows = paymentOrderMapper.accumulateRefunded(refund.getPaymentOrderNo(), refund.getAmount());
         if (accRows == 0) {
             log.error("[告警] 累计退款金额超过实付金额 refundNo={}, paymentOrderNo={}",
                     refund.getRefundNo(), refund.getPaymentOrderNo());
@@ -230,10 +211,7 @@ public class RefundService {
                 ? OrderStatus.REFUNDED.name()
                 : OrderStatus.PARTIALLY_REFUNDED.name();
         OrderStateMachine.checkTransition(OrderStatus.REFUNDING, OrderStatus.valueOf(targetStatus));
-        orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, targetStatus)
-                .eq(Order::getOrderNo, refund.getOrderNo())
-                .eq(Order::getStatus, OrderStatus.REFUNDING.name()));
+        orderMapper.updateStatusFromRefunding(refund.getOrderNo(), targetStatus);
 
         insertRefundLog(refund.getRefundNo(), RefundStatus.PROCESSING.name(), RefundStatus.SUCCESS.name(),
                 "渠道退款成功回调");
@@ -255,11 +233,7 @@ public class RefundService {
         if (refundStatus == null || !RefundStateMachine.canTransition(refundStatus, RefundStatus.FAILED)) {
             return; // 幂等：已是失败态或非法状态
         }
-        int rows = refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
-                .set(Refund::getStatus, RefundStatus.FAILED.name())
-                .set(Refund::getFailTime, LocalDateTime.now())
-                .eq(Refund::getRefundNo, request.getBizNo())
-                .eq(Refund::getStatus, refundStatus.name()));
+        int rows = refundMapper.markRefundFailed(request.getBizNo(), LocalDateTime.now(), refundStatus.name());
         if (rows == 0) {
             return;
         }
@@ -269,10 +243,7 @@ public class RefundService {
                 ? OrderStatus.PARTIALLY_REFUNDED.name()
                 : OrderStatus.PAID.name();
         OrderStateMachine.checkTransition(OrderStatus.REFUNDING, OrderStatus.valueOf(targetStatus));
-        orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, targetStatus)
-                .eq(Order::getOrderNo, refund.getOrderNo())
-                .eq(Order::getStatus, OrderStatus.REFUNDING.name()));
+        orderMapper.updateStatusFromRefunding(refund.getOrderNo(), targetStatus);
 
         insertRefundLog(refund.getRefundNo(), RefundStatus.PROCESSING.name(), RefundStatus.FAILED.name(),
                 "渠道退款失败回调");
@@ -291,20 +262,13 @@ public class RefundService {
 
     @Transactional
     public void markProcessingTx(String refundNo, String channelRefundNo) {
-        refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
-                .set(Refund::getStatus, RefundStatus.PROCESSING.name())
-                .set(Refund::getChannelRefundNo, channelRefundNo)
-                .eq(Refund::getRefundNo, refundNo)
-                .eq(Refund::getStatus, RefundStatus.CREATED.name()));
+        refundMapper.markProcessing(refundNo, channelRefundNo);
     }
 
     @Transactional
     public void markFailedTx(String refundNo, String remark) {
-        refundMapper.update(null, new LambdaUpdateWrapper<Refund>()
-                .set(Refund::getStatus, RefundStatus.FAILED.name())
-                .set(Refund::getFailTime, LocalDateTime.now())
-                .eq(Refund::getRefundNo, refundNo)
-                .in(Refund::getStatus, RefundStatus.CREATED.name(), RefundStatus.PROCESSING.name()));
+        refundMapper.markFailed(refundNo, LocalDateTime.now(),
+                List.of(RefundStatus.CREATED.name(), RefundStatus.PROCESSING.name()));
     }
 
     private Refund findByRefundNo(String refundNo) {

@@ -6,9 +6,11 @@ spring:
     name: mini-payment
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://124.222.192.3:3306/mini_payment?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+#    url: jdbc:mysql://124.222.192.3:3306/mini_payment?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://192.168.200.128/mini_payment?serverTimezone=Asia/Shanghai&characterEncoding=utf-8
+#    password: 8ik9ol000
+    password: NFTurbo666
     username: root
-    password: 8ik9ol000
   data:
     redis:
       host: 124.222.192.3

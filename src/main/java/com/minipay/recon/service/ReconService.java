@@ -94,13 +94,17 @@ public class ReconService {
             generateBillFile(request.getChannel(), filePath, request.isInjectAnomalies());
             List<BillRow> billRows = parseBillFile(filePath);
             reconcile(task, request.getChannel(), billRows);
+            LocalDateTime finishedAt = LocalDateTime.now();
             task.setStatus(ReconTaskStatus.COMPLETED.name());
-            task.setFinishedAt(LocalDateTime.now());
-            reconTaskMapper.updateById(task);
+            task.setFinishedAt(finishedAt);
+            reconTaskMapper.finishTask(task.getId(), task.getBillFile(), task.getTotalCount(),
+                    task.getMatchedCount(), task.getDiffCount(), task.getStatus(), finishedAt, finishedAt);
         } catch (Exception e) {
+            LocalDateTime finishedAt = LocalDateTime.now();
             task.setStatus(ReconTaskStatus.FAILED.name());
-            task.setFinishedAt(LocalDateTime.now());
-            reconTaskMapper.updateById(task);
+            task.setFinishedAt(finishedAt);
+            reconTaskMapper.finishTask(task.getId(), task.getBillFile(), task.getTotalCount(),
+                    task.getMatchedCount(), task.getDiffCount(), task.getStatus(), finishedAt, finishedAt);
             log.error("[告警] 对账失败 channel={}, billDate={}", request.getChannel(), request.getBillDate(), e);
             throw new BizException(ResultCode.RECON_BILL_INVALID, "对账失败: " + e.getMessage());
         }
@@ -126,7 +130,9 @@ public class ReconService {
                 EnumUtils.getEnum(ReconDiffStatus.class, diff.getStatus()), ReconDiffStatus.HANG);
         diff.setStatus(ReconDiffStatus.HANG.name());
         applyHandle(diff, request);
-        if (reconDifferenceMapper.updateById(diff) == 0) {
+        LocalDateTime now = LocalDateTime.now();
+        if (reconDifferenceMapper.updateHandleInfo(diff.getId(), diff.getStatus(), diff.getOperator(),
+                diff.getRemark(), diff.getHandleTime(), diff.getVersion(), now) == 0) {
             throw new BizException(ResultCode.RECON_DIFF_STATUS_INVALID, "并发冲突，请刷新后重试");
         }
     }
@@ -138,7 +144,9 @@ public class ReconService {
                 EnumUtils.getEnum(ReconDiffStatus.class, diff.getStatus()), ReconDiffStatus.RESOLVED);
         diff.setStatus(ReconDiffStatus.RESOLVED.name());
         applyHandle(diff, request);
-        if (reconDifferenceMapper.updateById(diff) == 0) {
+        LocalDateTime now = LocalDateTime.now();
+        if (reconDifferenceMapper.updateHandleInfo(diff.getId(), diff.getStatus(), diff.getOperator(),
+                diff.getRemark(), diff.getHandleTime(), diff.getVersion(), now) == 0) {
             throw new BizException(ResultCode.RECON_DIFF_STATUS_INVALID, "并发冲突，请刷新后重试");
         }
     }
@@ -150,7 +158,9 @@ public class ReconService {
                 EnumUtils.getEnum(ReconDiffStatus.class, diff.getStatus()), ReconDiffStatus.CLOSED);
         diff.setStatus(ReconDiffStatus.CLOSED.name());
         applyHandle(diff, request);
-        if (reconDifferenceMapper.updateById(diff) == 0) {
+        LocalDateTime now = LocalDateTime.now();
+        if (reconDifferenceMapper.updateHandleInfo(diff.getId(), diff.getStatus(), diff.getOperator(),
+                diff.getRemark(), diff.getHandleTime(), diff.getVersion(), now) == 0) {
             throw new BizException(ResultCode.RECON_DIFF_STATUS_INVALID, "并发冲突，请刷新后重试");
         }
     }

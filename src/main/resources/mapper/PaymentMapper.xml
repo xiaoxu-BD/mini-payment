@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.minipay.payment.mapper.PaymentMapper">
+
+    <!-- 支付成功回调：状态守卫（fromStatus 由状态机裁决传入） -->
+    <update id="markPaySuccess">
+        UPDATE t_payment
+        SET status = 'SUCCESS', success_time = #{successTime}
+        <if test="channelTransactionNo != null and channelTransactionNo != ''">
+            , channel_transaction_no = #{channelTransactionNo}
+        </if>
+        WHERE payment_no = #{paymentNo} AND status = #{fromStatus}
+    </update>
+
+    <!-- 支付失败回调 -->
+    <update id="markPayFailed">
+        UPDATE t_payment
+        SET status = 'FAILED', fail_time = #{failTime}
+        WHERE payment_no = #{paymentNo} AND status = #{fromStatus}
+    </update>
+
+    <!-- 回填渠道交易号与收银台地址（创建渠道后） -->
+    <update id="markPaying">
+        UPDATE t_payment
+        SET channel_transaction_no = #{channelTransactionNo}, channel_pay_url = #{payUrl}
+        WHERE payment_no = #{paymentNo} AND status = 'PAYING'
+    </update>
+
+    <!-- 批量关闭在途流水（订单取消/超时联动） -->
+    <update id="closePayments">
+        UPDATE t_payment
+        SET status = 'CLOSED', close_time = #{closeTime}
+        WHERE payment_order_no IN
+        <foreach collection="paymentOrderNos" item="no" open="(" separator="," close=")">
+            #{no}
+        </foreach>
+          AND status IN
+        <foreach collection="closablePayments" item="s" open="(" separator="," close=")">
+            #{s}
+        </foreach>
+    </update>
+
+</mapper>

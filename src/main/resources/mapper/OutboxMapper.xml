@@ -14,4 +14,22 @@
         </foreach>
     </insert>
 
+    <!-- 批量标记已投递 -->
+    <update id="markSent">
+        UPDATE t_message_outbox
+        SET status = 'SENT', updated_at = #{updatedAt}
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <!-- 投递失败：更新重试信息 -->
+    <update id="updateRetry">
+        UPDATE t_message_outbox
+        SET retry_count = #{retryCount}, status = #{status},
+            next_retry_time = #{nextRetryTime}, updated_at = #{updatedAt}
+        WHERE id = #{id}
+    </update>
+
 </mapper>

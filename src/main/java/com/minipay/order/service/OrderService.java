@@ -2,7 +2,6 @@ package com.minipay.order.service;
 
 import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.common.api.ResultCode;
 import com.minipay.common.enums.CancelType;
 import com.minipay.common.enums.MqEventType;
@@ -13,6 +12,7 @@ import com.minipay.common.util.BizNoGenerator;
 import com.minipay.infra.outbox.OutboxService;
 import com.minipay.order.dto.CreateOrderItemRequest;
 import com.minipay.order.dto.CreateOrderRequest;
+import com.minipay.order.dto.OrderItemResponse;
 import com.minipay.order.dto.OrderResponse;
 import com.minipay.order.entity.Order;
 import com.minipay.order.entity.OrderItem;
@@ -52,7 +52,7 @@ public class OrderService {
     public OrderResponse createOrder(CreateOrderRequest request) {
         Order exist = findByOrderIdempotentKey(request.getIdempotentKey());
         if (exist != null) {
-            return toResponse(exist);
+            return queryOrder(exist.getOrderNo());
         }
 
         String orderNo = BizNoGenerator.orderNo();
@@ -97,13 +97,13 @@ public class OrderService {
             if (existOrder == null) {
                 throw new BizException(ResultCode.SYSTEM_ERROR, "订单创建冲突，请重试");
             }
-            return toResponse(existOrder);
+            return queryOrder(existOrder.getOrderNo());
         }
         orderItemMapper.insertList(items);
 
         outboxService.record(SERVICE, MqEventType.ORDER_CREATED,
                 new OrderCreatedEvent(orderNo, order.getUserId(), order.getTotalAmount()));
-        return toResponse(order);
+        return toResponse(order, items);
     }
 
     /**
@@ -112,12 +112,7 @@ public class OrderService {
     @Transactional
     public void cancelOrder(String orderNo, CancelType cancelType, String operator) {
         LocalDateTime now = LocalDateTime.now();
-        int rows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
-                .set(Order::getStatus, OrderStatus.CANCELLED.name())
-                .set(Order::getCancelType, cancelType.name())
-                .set(Order::getCancelTime, now)
-                .eq(Order::getOrderNo, orderNo)
-                .eq(Order::getStatus, OrderStatus.PENDING_PAYMENT.name()));
+        int rows = orderMapper.cancelByOrderNo(orderNo, cancelType.name(), now);
         if (rows == 0) {
             Order order = findByOrderNo(orderNo);
             if (order == null) {
@@ -141,7 +136,9 @@ public class OrderService {
         if (order == null) {
             throw new BizException(ResultCode.ORDER_NOT_FOUND);
         }
-        return toResponse(order);
+        List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>()
+                .eq(OrderItem::getOrderNo, orderNo));
+        return toResponse(order, items);
     }
 
     public Order findByOrderNo(String orderNo) {
@@ -154,11 +151,12 @@ public class OrderService {
                 .eq(Order::getIdempotentKey, idempotentKey));
     }
 
-    private OrderResponse toResponse(Order order) {
-        List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>()
-                .eq(OrderItem::getOrderNo, order.getOrderNo()));
-        List<OrderResponse.ItemResponse> itemResponses = items.stream()
-                .map(i -> OrderResponse.ItemResponse.builder()
+    /**
+     * 纯内存映射：不查数据库。查询职责由 queryOrder / 调用方负责，避免 N+1。
+     */
+    private OrderResponse toResponse(Order order, List<OrderItem> items) {
+        List<OrderItemResponse> itemResponses = items.stream()
+                .map(i -> OrderItemResponse.builder()
                         .itemNo(i.getItemNo())
                         .productId(i.getProductId())
                         .productName(i.getProductName())

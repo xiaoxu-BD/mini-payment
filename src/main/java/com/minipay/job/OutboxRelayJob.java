@@ -1,7 +1,6 @@
 package com.minipay.job;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.common.enums.OutboxStatus;
 import com.minipay.infra.mq.MqMessage;
 import com.minipay.infra.mq.MqProducer;
@@ -58,14 +57,13 @@ public class OutboxRelayJob {
                     outbox.setStatus(OutboxStatus.FAILED.name());
                     outbox.setNextRetryTime(LocalDateTime.now().plusSeconds(Math.min(60, 2L * retry)));
                 }
-                outboxMapper.updateById(outbox);
+                outboxMapper.updateRetry(outbox.getId(), retry, outbox.getStatus(),
+                        outbox.getNextRetryTime(), LocalDateTime.now());
             }
         }
         // 批量标记已投递，避免循环内逐条 update
         if (CollectionUtils.isNotEmpty(sentIds)) {
-            outboxMapper.update(null, new LambdaUpdateWrapper<Outbox>()
-                    .set(Outbox::getStatus, OutboxStatus.SENT.name())
-                    .in(Outbox::getId, sentIds));
+            outboxMapper.markSent(sentIds, LocalDateTime.now());
         }
     }
 }

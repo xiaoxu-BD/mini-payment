@@ -5,7 +5,6 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.EnumUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.minipay.channel.ChannelGateway;
 import com.minipay.channel.dto.ChannelCloseRequest;
 import com.minipay.channel.dto.ChannelCreateRequest;
@@ -101,10 +100,14 @@ public class PaymentService {
      */
     public void closeActivePaymentOrder(String orderNo, CloseType closeType, String operator) {
         // 可关闭状态集由状态机推导，避免手写规则
+
+        //支付单 可以关闭CLOSE 允许转换的规则
         List<String> closableIntents = Arrays.stream(PaymentOrderStatus.values())
                 .filter(s -> PaymentOrderStateMachine.canTransition(s, PaymentOrderStatus.CLOSED))
                 .map(Enum::name)
                 .toList();
+
+        //流水可关闭订单 允许转换的规则
         List<String> closablePayments = Arrays.stream(PaymentStatus.values())
                 .filter(s -> PaymentStateMachine.canTransition(s, PaymentStatus.CLOSED))
                 .map(Enum::name)
@@ -123,19 +126,9 @@ public class PaymentService {
                 .in(Payment::getPaymentOrderNo, paymentOrderNos)
                 .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
         LocalDateTime now = LocalDateTime.now();
-        // 批量关闭意图：状态守卫保证不与支付成功回调竞争（阶段6锁策略）
-        paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                .set(PaymentOrder::getStatus, PaymentOrderStatus.CLOSED.name())
-                .set(PaymentOrder::getCloseType, closeType.name())
-                .set(PaymentOrder::getCloseTime, now)
-                .in(PaymentOrder::getPaymentOrderNo, paymentOrderNos)
-                .in(PaymentOrder::getStatus, closableIntents));
-        // 批量关闭在途流水
-        paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
-                .set(Payment::getStatus, PaymentStatus.CLOSED.name())
-                .set(Payment::getCloseTime, now)
-                .in(Payment::getPaymentOrderNo, paymentOrderNos)
-                .in(Payment::getStatus, closablePayments));
+        // 批量关闭意图 + 在途流水：状态守卫保证不与支付成功回调竞争（SQL 见 XML）
+        paymentOrderMapper.closeIntents(paymentOrderNos, closableIntents, closeType.name(), now);
+        paymentMapper.closePayments(paymentOrderNos, closablePayments, now);
         // 事务外逐笔联动关闭渠道（网络调用，不进事务）
         for (Payment payment : inFlight) {
             if (StringUtils.isNotBlank(payment.getChannelTransactionNo())) {
@@ -220,24 +213,14 @@ public class PaymentService {
 
     @Transactional
     public void markPayingTx(String paymentNo, String channelTransactionNo, String payUrl) {
-        paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
-                .set(Payment::getChannelTransactionNo, channelTransactionNo)
-                .set(Payment::getChannelPayUrl, payUrl)
-                .eq(Payment::getPaymentNo, paymentNo)
-                .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
+        paymentMapper.markPaying(paymentNo, channelTransactionNo, payUrl);
     }
 
     @Transactional
     public void markFailedTx(String paymentOrderNo, String paymentNo, String reason) {
-        paymentMapper.update(null, new LambdaUpdateWrapper<Payment>()
-                .set(Payment::getStatus, PaymentStatus.FAILED.name())
-                .set(Payment::getFailTime, LocalDateTime.now())
-                .eq(Payment::getPaymentNo, paymentNo)
-                .eq(Payment::getStatus, PaymentStatus.PAYING.name()));
-        paymentOrderMapper.update(null, new LambdaUpdateWrapper<PaymentOrder>()
-                .set(PaymentOrder::getStatus, PaymentOrderStatus.FAILED.name())
-                .eq(PaymentOrder::getPaymentOrderNo, paymentOrderNo)
-                .in(PaymentOrder::getStatus, PaymentOrderStatus.CREATED.name(), PaymentOrderStatus.PAYING.name()));
+        paymentMapper.markPayFailed(paymentNo, LocalDateTime.now(), PaymentStatus.PAYING.name());
+        paymentOrderMapper.markFailed(paymentOrderNo,
+                List.of(PaymentOrderStatus.CREATED.name(), PaymentOrderStatus.PAYING.name()));
     }
 
     private void closeChannelBestEffort(Payment payment) {
