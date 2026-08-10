@@ -5,11 +5,11 @@
     <!-- 批量插入本地消息：MyBatis foreach -->
     <insert id="insertBatch">
         INSERT INTO t_message_outbox
-        (id, event_id, service, event_type, payload, status, retry_count, next_retry_time,
+        (id, event_id, trace_id, service, event_type, payload, status, retry_count, next_retry_time,
          version, created_at, updated_at)
         VALUES
         <foreach collection="items" item="it" separator=",">
-            (#{it.id}, #{it.eventId}, #{it.service}, #{it.eventType}, #{it.payload}, #{it.status},
+            (#{it.id}, #{it.eventId}, #{it.traceId}, #{it.service}, #{it.eventType}, #{it.payload}, #{it.status},
              #{it.retryCount}, #{it.nextRetryTime}, #{it.version}, #{it.createdAt}, #{it.updatedAt})
         </foreach>
     </insert>

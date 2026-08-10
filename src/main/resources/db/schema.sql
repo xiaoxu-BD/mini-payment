@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS t_recon_difference (
 CREATE TABLE IF NOT EXISTS t_message_outbox (
     id               BIGINT      NOT NULL COMMENT '主键',
     event_id         VARCHAR(64) NOT NULL COMMENT '消息幂等键',
+    trace_id         VARCHAR(64) DEFAULT NULL COMMENT '链路追踪ID',
     service          VARCHAR(32) NOT NULL COMMENT '来源服务: order/payment/refund/recon',
     event_type       VARCHAR(64) NOT NULL COMMENT '事件类型: OrderCreated/PaymentSucceeded/...',
     payload          TEXT        COMMENT '消息体(JSON)',

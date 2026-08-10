@@ -7,6 +7,7 @@ import com.minipay.common.api.ResultCode;
 import com.minipay.common.enums.MqEventType;
 import com.minipay.common.enums.OutboxStatus;
 import com.minipay.common.exception.BizException;
+import com.minipay.common.trace.TraceContext;
 import com.minipay.common.util.BizNoGenerator;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -30,6 +31,7 @@ public class OutboxService {
             Outbox outbox = new Outbox();
             outbox.setId(BizNoGenerator.id());
             outbox.setEventId(BizNoGenerator.eventId());
+            outbox.setTraceId(TraceContext.getOrCreate());
             outbox.setService(service);
             outbox.setEventType(eventType.name());
             outbox.setPayload(objectMapper.writeValueAsString(payload));
@@ -59,6 +61,7 @@ public class OutboxService {
                 Outbox outbox = new Outbox();
                 outbox.setId(BizNoGenerator.id());
                 outbox.setEventId(BizNoGenerator.eventId());
+                outbox.setTraceId(TraceContext.getOrCreate());
                 outbox.setService(service);
                 outbox.setEventType(eventType.name());
                 outbox.setPayload(objectMapper.writeValueAsString(payload));

@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 public class Outbox extends BaseEntity {
 
     private String eventId;
+    private String traceId;
     private String service;
     private String eventType;
     private String payload;

@@ -44,7 +44,8 @@ public class OutboxRelayJob {
         List<Long> sentIds = new ArrayList<>();
         for (Outbox outbox : pending) {
             try {
-                mqProducer.publish(new MqMessage(outbox.getEventId(), outbox.getEventType(), outbox.getPayload()));
+                mqProducer.publish(new MqMessage(outbox.getEventId(), outbox.getEventType(),
+                        outbox.getPayload(), outbox.getTraceId()));
                 sentIds.add(outbox.getId());
             } catch (Exception e) {
                 int retry = outbox.getRetryCount() + 1;
