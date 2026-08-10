@@ -23,8 +23,9 @@ public class OrderCreatedEventHandler implements OutboxEventHandler {
     }
 
     @Override
-    public void handle(String payloadJson) throws Exception {
+    public void handle(String eventType, String payloadJson) throws Exception {
         OrderCreatedEvent event = objectMapper.readValue(payloadJson, OrderCreatedEvent.class);
-        log.info("收到订单创建事件 orderNo={}, amount={}", event.getOrderNo(), event.getTotalAmount());
+        log.info("收到订单创建事件 eventType={}, orderNo={}, amount={}",
+                eventType, event.getOrderNo(), event.getTotalAmount());
     }
 }

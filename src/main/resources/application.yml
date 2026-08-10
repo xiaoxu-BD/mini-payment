@@ -15,6 +15,19 @@ spring:
     redis:
       host: 124.222.192.3
       port: 6379
+  mail:
+    host: smtp.163.com
+    port: 465
+    # 163 邮箱地址 + SMTP 授权码（不是登录密码，需在 163 邮箱设置中开启 SMTP 服务获取）
+    username: tingqq7z@163.com
+    password: QCciCnaKHLGiMePg
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: Asia/Shanghai
@@ -38,6 +51,12 @@ app:
     expire-minutes: 15
   recon:
     bill-dir: ./recon-bills
+  notify:
+    email:
+      # 配置好邮箱后改为 true 即可在 MQ 消费时发送通知邮件
+      enabled: false
+      from: tingqq7z@163.com
+      to: tingqq7z@163.com
   channel:
     # mock 渠道：模拟微信/支付宝的支付创建与回调
     mock:

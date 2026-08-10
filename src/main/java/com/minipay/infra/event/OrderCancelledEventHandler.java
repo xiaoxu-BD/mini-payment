@@ -27,7 +27,7 @@ public class OrderCancelledEventHandler implements OutboxEventHandler {
     }
 
     @Override
-    public void handle(String payloadJson) throws Exception {
+    public void handle(String eventType, String payloadJson) throws Exception {
         OrderCancelledEvent event = objectMapper.readValue(payloadJson, OrderCancelledEvent.class);
         log.info("处理订单取消事件 orderNo={}", event.getOrderNo());
         CloseType closeType = EnumUtils.getEnum(CloseType.class, event.getCancelType());

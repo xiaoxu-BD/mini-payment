@@ -15,7 +15,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -43,7 +42,9 @@ public class MqEventConsumer {
 
     @PostConstruct
     public void init() {
-        handlerMap = handlers.stream().collect(Collectors.toMap(OutboxEventHandler::eventType, Function.identity()));
+        handlerMap = handlers.stream()
+                .flatMap(h -> h.eventTypes().stream().map(t -> Map.entry(t, h)))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         try {
             DefaultMQPushConsumer consumer = new DefaultMQPushConsumer(consumerGroup);
             consumer.setNamesrvAddr(nameServer);
@@ -59,7 +60,7 @@ public class MqEventConsumer {
                             continue;
                         }
                         // 处理器内部的条件更新保证重复消费幂等
-                        handler.handle(envelope.payload());
+                        handler.handle(envelope.eventType(), envelope.payload());
                         log.info("MQ 消费成功 eventId={}, eventType={}", envelope.eventId(), envelope.eventType());
                     } catch (Exception e) {
                         log.error("MQ 消费失败 msgId={}, 交由MQ重试", message.getMsgId(), e);
